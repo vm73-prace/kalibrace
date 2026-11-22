@@ -56,6 +56,8 @@ export async function mockSupabase(page, { pristup = true } = {}) {
 
     const cesta = url.pathname.replace('/rest/v1/', '');
     hlavicky.push(m === 'GET' ? h['accept-profile'] : h['content-profile']);
+    // jako produkce: bez JWT přihlášeného (jen publishable klíč) je to anon a ten nemá žádná práva
+    if (!(h.authorization || '').startsWith('Bearer eyJ')) return json(401, { code: '42501', message: 'permission denied for ' + cesta });
     if (cesta === 'rpc/smi') return json(200, pristup);
     const t = store[cesta];
     if (!t) return json(404, { code: 'PGRST205', message: 'neznámá tabulka ' + cesta });

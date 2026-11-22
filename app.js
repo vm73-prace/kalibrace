@@ -1,5 +1,5 @@
 /* Evidence kalibrací – appka (vanilla JS). Výpočty jsou v calc.js, ukázková data v demo.js. */
-var VERZE = 7;
+var VERZE = 8;
 var Q = new URLSearchParams(location.search);
 var DEBUG = Q.get('debug') === '1';
 var DEMO = Q.get('demo') === '1'; // ?demo=1 = ukázková data v paměti, bez Supabase
@@ -109,6 +109,15 @@ var apiSupabase = {
 };
 var api = DEMO ? apiDemo : apiSupabase;
 
+// Úložiště přihlášení: kopie v paměti a zápis do localStorage odložený (Avast AntiTrack blokuje synchronní zápis
+// ze skriptu z CDN); když localStorage nejde, přihlášení platí do zavření stránky.
+// Smazání = null v paměti (ne delete), jinak by čtení vrátilo starou session z localStorage.
+var authPamet = {};
+var authStorage = {
+  getItem: function (k) { if (k in authPamet) return authPamet[k]; try { return localStorage.getItem(k); } catch (e) { return null; } },
+  setItem: function (k, v) { authPamet[k] = v; setTimeout(function () { try { localStorage.setItem(k, v); } catch (e) { log('auth: localStorage nejde zapsat'); } }, 0); },
+  removeItem: function (k) { authPamet[k] = null; setTimeout(function () { try { localStorage.removeItem(k); } catch (e) { /* bez úložiště */ } }, 0); }
+};
 function nactiSkript(src) {
   return new Promise(function (res, rej) {
     var el = document.createElement('script'); el.src = src; el.onload = res;
@@ -139,7 +148,7 @@ function start() {
   if (DEMO) return render();
   app.innerHTML = '<main><h1>Kalibrace</h1><div class="empty">Načítám…</div></main>';
   nactiSkript(SUPABASE_JS).then(function () {
-    sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+    sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY, { auth: { storage: authStorage, storageKey: SCHEMA + '-auth', persistSession: true, autoRefreshToken: true } });
     db = sb.schema(SCHEMA);
     sb.auth.onAuthStateChange(function (udalost) {
       log('auth', udalost);
@@ -170,7 +179,13 @@ function vPrihlaseni() {
     sb.auth.signInWithPassword({ email: email, password: heslo }).then(function (r) {
       log('přihlášení', r.error ? (r.error.status + ' ' + r.error.message) : 'ok');
       if (r.error) throw new Error(/invalid login/i.test(r.error.message) ? 'Špatný e-mail nebo heslo.' : r.error.message);
-      uzivatel = r.data.user;
+      return sb.auth.getSession();
+    }).then(function (r) {
+      if (!r.data.session) { // bez session by dotazy šly jako anon a skončily „permission denied“
+        logChyba('session se neuložila' + (r.error ? ': ' + r.error.message : ''));
+        throw new Error('Prohlížeč neuložil přihlášení. Obnov stránku a zkus to znovu, případně pro tuto adresu vypni blokování sledování (např. Avast AntiTrack).');
+      }
+      uzivatel = r.data.session.user;
       return nactiData();
     }).then(function () { location.hash = '#/'; render(); })
       .catch(function (err) { btn.disabled = false; chyba('Přihlášení se nepovedlo: ' + err.message); });

@@ -59,6 +59,8 @@ Jeden **slug** všude (zde `kalibrace`):
 | Edge Functions | `<slug>-<účel>` | (zatím žádné) |
 | Secrets | `<SLUG>_<SLUŽBA>_<CO>` | `KALIBRACE_SUPABASE_URL`, `KALIBRACE_SUPABASE_PUBLISHABLE_KEY`, `KALIBRACE_NOTIFY_TOKEN`, `KALIBRACE_SMTP_HOST`, `KALIBRACE_SMTP_PORT`, `KALIBRACE_SMTP_USER`, `KALIBRACE_SMTP_PASSWORD` |
 
+**Přihlášení Supabase – pravidlo pro všechny appky (2026-11-22):** `createClient` vždy s vlastním auth storage (kopie v paměti + zápis do localStorage odložený přes `setTimeout`, čtení nejdřív z paměti, vše v try/catch) a vlastním `storageKey: '<slug>-auth'`, `persistSession: true`, `autoRefreshToken: true`. Důvody: appky sdílejí origin `vm73-prace.github.io` (s výchozím klíčem by si session přepisovaly) a Avast AntiTrack blokuje synchronní zápis ze skriptu z CDN. `removeItem` zapíše do paměti `null`, ne `delete` (jinak se po odhlášení vrátí stará session z localStorage). Po přihlášení ověřit `getSession()` ještě před prvním dotazem. Vzor: `authPamet` / `authStorage` v `app.js`.
+
 ## Struktura projektu
 
 - `README.md`: přehled a e-mailová upozornění (plný návod v etapě 7)

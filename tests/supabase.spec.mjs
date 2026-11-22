@@ -123,3 +123,73 @@ test('přihlašovací obrazovka nepřetéká', async ({ page }) => {
   expect(r.sw).toBeLessThanOrEqual(r.cw);
   await expect(page.locator('footer')).toHaveText(/^verze \d+$/);
 });
+
+// Úložiště přihlášení
+const SKUPINA = { id: '22222222-2222-4222-8222-222222222222', owner: UID, nazev: 'Anemometry', typ: 'anemometr', min_platnych: 1, poradi: 1 };
+const BLOKACE = {
+  'zápis nic neuloží': () => { Storage.prototype.setItem = function () {}; },
+  'zápis vyhodí výjimku': () => { Storage.prototype.setItem = function () { throw new DOMException('blokováno', 'SecurityError'); }; },
+  'localStorage je nedostupné': () => { Object.defineProperty(window, 'localStorage', { get() { throw new DOMException('blokováno', 'SecurityError'); } }); }
+};
+for (const [popis, blokuj] of Object.entries(BLOKACE)) {
+  test('blokované úložiště (' + popis + '): po přihlášení se data načtou', async ({ page }) => {
+    const { store } = await mockSupabase(page);
+    store.skupiny.push({ ...SKUPINA });
+    await page.addInitScript(blokuj);
+    await page.goto('/');
+    await prihlas(page);
+    await expect(page.locator('main')).toContainText('Anemometry');
+    await expect(page.locator('#souhrn')).toBeVisible();
+    // přihlášení jen v paměti: po obnovení stránky se přihlašuje znovu
+    await page.reload();
+    await expect(page.locator('#f_email')).toBeVisible();
+  });
+}
+
+test('blokovaný jen synchronní zápis ze skriptu z CDN: přihlášení přežije obnovení', async ({ page }) => {
+  const { store } = await mockSupabase(page);
+  store.skupiny.push({ ...SKUPINA });
+  await page.addInitScript(() => {
+    const puvodni = Storage.prototype.setItem;
+    Storage.prototype.setItem = function () {
+      if (new Error().stack.includes('cdn.jsdelivr.net')) return;
+      return puvodni.apply(this, arguments);
+    };
+  });
+  await page.goto('/');
+  await prihlas(page);
+  await expect(page.locator('main')).toContainText('Anemometry');
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('kalibrace-auth'))).toContain('access_token');
+  await page.reload();
+  await expect(page.locator('main')).toContainText('Anemometry');
+});
+
+test('odhlášení platí i při blokovaném mazání z localStorage', async ({ page }) => {
+  await mockSupabase(page);
+  await page.goto('/');
+  await prihlas(page);
+  await expect(page.locator('main .empty')).toContainText('Zatím žádné skupiny');
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('kalibrace-auth'))).toContain('access_token');
+  await page.evaluate(() => { Storage.prototype.removeItem = function () {}; });
+  await page.evaluate(() => { location.hash = '#/nastaveni'; });
+  await page.getByRole('button', { name: 'Odhlásit' }).click();
+  await expect(page.locator('#f_email')).toBeVisible();
+  expect(await page.evaluate(async () => (await sb.auth.getSession()).data.session)).toBeNull();
+});
+
+test('neuložená session: srozumitelná hláška, log a žádný dotaz jako anon', async ({ page }) => {
+  const { hlavicky } = await mockSupabase(page);
+  await page.goto('/?debug=1');
+  await expect(page.locator('#f_email')).toBeVisible();
+  await page.evaluate(() => { sb.auth.getSession = async () => ({ data: { session: null }, error: null }); });
+  await page.locator('#f_email').fill(EMAIL);
+  await page.locator('#f_heslo').fill(HESLO);
+  await page.locator('#f_heslo').press('Enter'); // debug panel překrývá tlačítko
+  await expect(page.locator('#chyba')).toContainText('Prohlížeč neuložil přihlášení');
+  await expect(page.locator('#chyba')).not.toContainText('permission denied');
+  await expect(page.locator('#debug')).toContainText('session se neuložila');
+  await expect(page.getByRole('button', { name: 'Přihlásit' })).toBeEnabled();
+  expect(hlavicky).toEqual([]);
+  expect(chyby).toEqual(['[kal] session se neuložila']); // jediná chyba v konzoli je očekávaný záznam
+  chyby.length = 0;
+});
