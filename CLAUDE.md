@@ -12,8 +12,13 @@
 - Výchozí hodnoty: interval kalibrace **12 měsíců**, doba v laboratoři **14 dní**, předstih **30 dní**.
 - Repo `vm73-prace/kalibrace` (GitHub Pages), upozornění odesílá pracovní schránka přes SMTP (`KALIBRACE_SMTP_*` v GitHub Secrets), příjemce jen v tabulce `nastaveni` (ne v repu); změna 2026-11-14, původně Gmail.
 
-## Stav projektu (2026-11-18)
+## Stav projektu (2026-11-22)
 
+- **Verze 8 (2026-11-22), oprava přihlášení, nasazeno (commit 29a12eb):** v Chrome s Avast AntiTrack se neukládala session a dotazy šly jako anon (401 / 42501). Nově vlastní auth storage a `storageKey: 'kalibrace-auth'` (pravidlo viz Konvence), po přihlášení kontrola `getSession()` (log „session se neuložila“ + česká hláška). DB, granty a RLS beze změny. Všichni se jednou znovu přihlásí.
+  - Testy: Node 48/48, Python 21/21, Playwright 105/105. Mock Supabase vrací bez JWT 401 / 42501 jako produkce; nové testy na blokovaný zápis i mazání v localStorage a na neuloženou session.
+  - Ověřeno na Pages: `VERZE = 8`, cache `kalibrace-v8`, storageKey, bez chyb JS (Chrome a emulace iPhone 13, bez přihlášení).
+  - **Neověřeno:** přihlášení skutečným účtem v Chrome se skutečným Avast AntiTrack a na iPhonu po změně klíče (dělá správce); souběh více záložek (každá má vlastní kopii session v paměti).
+  - **Zbývá:** nahrát upravený skill `vyvoj-appky-zaklad` s tímto pravidlem (v nainstalovaném skillu zatím není); v ostatních appkách se stejným vzorem opravit `removeItem` (`null` místo `delete`).
 - **2026-11-18 zadány 4 historické kalibrace ze skenů** (Testo 425, Testo 417, sonda Testo 0635 1570, ProHood PH731), všechny propadlé; +3 skupiny (Anemometr termický, Sonda Testo 0635 1570, Balometr), +4 přístroje, +4 kalibrace (SQL přes konektor, technik prázdný). PDF nahraje správce v appce (Upravit kalibraci). Poznámka: `cislo_protokolu` je NOT NULL, prázdné = `''`.
 - **Převod na pracovní účet správce – uzavřen (2026-11-19):** data kalibrace (4 tabulky) i soubory (oba buckety) převedena z osobního účtu na pracovní účet správce, bez service_role; ověřeno v appce pracovním účtem (fotka i protokol se otevřou) a ručním během `kontrola.yml` s `dry_run` (Supabase 200). Osobní účet už `'kalibrace'` v `profily.aplikace` nemá a jeho složky v bucketech jsou smazané, takže rollback převodu už nejde. Podrobnosti (UUID, e-maily, SQL, skript) jen v `kalibrace-interni`. Obecný postup: README, sekce „Jak přidat / vyměnit správce“. Appka ani skript upozornění se neměnily.
 - 2026-11-19: PDF protokolů nahrána u všech 4 historických kalibrací, ověřeno v DB (protokol_path + objekt v bucketu kalibrace-protokoly). Zbývá: iPhone znovu přidat na plochu z https://vm73-prace.github.io/kalibrace/ a odeslat propadlé přístroje na kalibraci.
