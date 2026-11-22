@@ -14,13 +14,26 @@
 
 ## Stav projektu (2026-11-22)
 
+- **Verze 10 (2026-11-22), odhlášení jen tohoto zařízení, nasazeno (commit 510697f):**
+  1. Odhlásit volá `signOut({ scope: 'local' })`, ostatní zařízení zůstanou přihlášená.
+  2. Když `signOut` vrátí chybu nebo do **5 s** neskončí, appka smaže session sama (`authStorage.removeItem`), ukáže přihlášení a zaloguje „odhlášení offline – session smazána jen lokálně“. Limit je nutný: supabase-js při výpadku obnovu tokenu opakuje až 30 s a bez odpovědi serveru čeká bez konce.
+  3. Nové přihlášení čeká na nedokončený `signOut` (`odhlasovani`), jinak by mu opožděný `signOut` session smazal. Neodebírat.
+  4. Událost `storage`: smazání nebo vyprázdnění `kalibrace-auth` odhlásí i ostatní otevřené záložky. Bez toho druhá záložka po obnově tokenu zapsala session zpět.
+  - Ověření při startu přes `getUser()` beze změny.
+  - **Zbývající meze odhlášení (všechny ověřené proti mocku):**
+    - blokované mazání i zápis **a zároveň** nedostupný server → po F5 zase přihlášený (odhlášení není kam zapsat, ani předat jiné záložce),
+    - F5 nebo zavření appky během „Odhlašuji…“ (nejvýš 5 s) → zůstane přihlášený,
+    - výpadek už při načtení appky → jen hláška a „Zkusit znovu“, tlačítko Odhlásit tam není,
+    - po odhlášení úplně bez internetu a F5 → hláška o nenačtené knihovně (CDN) místo formuláře; session je smazaná, po připojení se ukáže přihlášení.
+  - **Důsledky:** odhlášení offline nechá sezení na serveru platné (v zařízení už není). Odhlásit už neslouží k odhlášení ztraceného zařízení, to jde jen na straně Supabase. Odhlášení s výchozím rozsahem v jiné appce se stejným účtem dál ruší i sezení kalibrace.
+  - Testy: Node 48/48, Python 21/21, Playwright 280/280 (18 nových v 5 profilech). Proti v9 selhalo všech 11 testů (a), (b), (c) v profilu iPhone 13 a všech 16 nových testů první sady v profilu w390; 2 testy záložek přibyly potom a selhaly i proti opravě bez události `storage`.
+  - Ověřeno na Pages: `var VERZE = 10`, cache `kalibrace-v10`, soubory shodné s commitem, bez chyb JS (Chrome a emulace iPhone 13, bez přihlášení).
+  - **Neověřeno:** skutečný účet a Supabase (dělá správce: přihlásit PC i iPhone → na PC Odhlásit → iPhone po znovuotevření zůstává přihlášený, PC po F5 ne), skutečný Avast AntiTrack, WebKit na iPhonu.
 - **Verze 9 (2026-11-22), oprava odhlášení, nasazeno (commit 8d7716a):** ve v8 se po odhlášení a F5 vracela stará session, když bylo blokované mazání z localStorage (`null` žil jen v paměti). Oprava má tři vrstvy, žádnou neodebírat:
   1. `removeItem`: v paměti `null` (platí do obnovení stránky),
   2. co nejde z localStorage smazat, přepíše se prázdnou hodnotou; `getItem` ji bere jako žádnou session (pokryje i výpadek serveru při odhlášení),
   3. `start()` ověří nalezenou session přes `getUser()`: `session_not_found` zahodí supabase-js, `bad_jwt` / `user_not_found` / `user_banned` appka (`signOut` se `scope: 'local'`). Jiná chyba (síť, 5xx, 429) při tomto ověření session nechá; vypršený token a výpadek = hláška se „Zkusit znovu“ (až po 30 s opakování v supabase-js), ne přihlašovací formulář.
-  - **Známá mez:** blokované mazání i zápis **a zároveň** nedostupný server při odhlášení → po F5 je uživatel zase přihlášený (odhlášení není kam zapsat).
-  - **Druhá mez, zatím neopravená (nalezena při testu v9):** vypršený token a nedostupný server při odhlášení, i bez blokování → `signOut` vrátí chybu dřív, než session smaže, a tlačítko Odhlásit neodhlásí (chyba je jen v logu).
-  - **Důsledek:** Odhlásit ruší všechna sezení účtu ve sdíleném projektu, takže se ostatní zařízení (i tato appka po odhlášení v jiné appce se stejným účtem) odhlásí už při příštím načtení.
+  - Meze odhlášení z v9: aktuální seznam je u verze 10 (vypršený token a odhlašování všech zařízení jsou opravené).
   - Testy: Node 48/48, Python 21/21, Playwright 190/190. Nové testy proti v8: všech 6 testů mazání + F5 selhalo (v 5 profilech), proti v9 prošly. Mock: anon 401 / 42501 se zněním a `hint` podle produkce, odhlášení ruší sezení (`/user` pak 403 `session_not_found`, REST JWT dál bere).
   - Ověřeno na Pages: `VERZE = 9`, cache `kalibrace-v9`, soubory shodné s commitem, bez chyb JS (Chrome a emulace iPhone 13, bez přihlášení); odhlášení + F5 na nasazeném kódu proti mocku Supabase.
   - **Neověřeno:** odhlášení skutečným účtem se skutečným Avast AntiTrack a na iPhonu (dělá správce: přihlásit → Odhlásit → F5 → musí být přihlašovací obrazovka).
@@ -74,7 +87,7 @@ Jeden **slug** všude (zde `kalibrace`):
 | Edge Functions | `<slug>-<účel>` | (zatím žádné) |
 | Secrets | `<SLUG>_<SLUŽBA>_<CO>` | `KALIBRACE_SUPABASE_URL`, `KALIBRACE_SUPABASE_PUBLISHABLE_KEY`, `KALIBRACE_NOTIFY_TOKEN`, `KALIBRACE_SMTP_HOST`, `KALIBRACE_SMTP_PORT`, `KALIBRACE_SMTP_USER`, `KALIBRACE_SMTP_PASSWORD` |
 
-**Přihlášení Supabase – pravidlo pro všechny appky (2026-11-22):** `createClient` vždy s vlastním auth storage (kopie v paměti + zápis do localStorage odložený přes `setTimeout`, čtení nejdřív z paměti, vše v try/catch) a vlastním `storageKey: '<slug>-auth'`, `persistSession: true`, `autoRefreshToken: true`. Důvody: appky sdílejí origin `vm73-prace.github.io` (s výchozím klíčem by si session přepisovaly) a Avast AntiTrack blokuje synchronní zápis ze skriptu z CDN. `removeItem` zapíše do paměti `null`, ne `delete`, a co z localStorage nejde smazat, přepíše prázdnou hodnotou; `getItem` ji bere jako žádnou session (jinak se po odhlášení nebo F5 vrátí stará session z localStorage). Při startu ověřit uloženou session přes `getUser()`: odmítnutou zahodit, při výpadku sítě nebo serveru nechat. Po přihlášení ověřit `getSession()` ještě před prvním dotazem. Vzor: `authPamet` / `authStorage` v `app.js`.
+**Přihlášení Supabase – pravidlo pro všechny appky (2026-11-22):** `createClient` vždy s vlastním auth storage (kopie v paměti + zápis do localStorage odložený přes `setTimeout`, čtení nejdřív z paměti, vše v try/catch) a vlastním `storageKey: '<slug>-auth'`, `persistSession: true`, `autoRefreshToken: true`. Důvody: appky sdílejí origin `vm73-prace.github.io` (s výchozím klíčem by si session přepisovaly) a Avast AntiTrack blokuje synchronní zápis ze skriptu z CDN. `removeItem` zapíše do paměti `null`, ne `delete`, a co z localStorage nejde smazat, přepíše prázdnou hodnotou; `getItem` ji bere jako žádnou session (jinak se po odhlášení nebo F5 vrátí stará session z localStorage). Odhlásit = `signOut({ scope: 'local' })`; při chybě nebo po 5 s smazat session lokálně, nové přihlášení nechat počkat na nedokončený `signOut` a událostí `storage` odhlásit ostatní záložky. Při startu ověřit uloženou session přes `getUser()`: odmítnutou zahodit, při výpadku sítě nebo serveru nechat. Po přihlášení ověřit `getSession()` ještě před prvním dotazem. Vzor: `authPamet` / `authStorage` / `odhlasit` v `app.js`.
 
 ## Struktura projektu
 
