@@ -1,5 +1,5 @@
 /* Evidence kalibrací – appka (vanilla JS). Výpočty jsou v calc.js, ukázková data v demo.js. */
-var VERZE = 9;
+var VERZE = 10;
 var Q = new URLSearchParams(location.search);
 var DEBUG = Q.get('debug') === '1';
 var DEMO = Q.get('demo') === '1'; // ?demo=1 = ukázková data v paměti, bez Supabase
@@ -113,6 +113,7 @@ var api = DEMO ? apiDemo : apiSupabase;
 // ze skriptu z CDN); když localStorage nejde, přihlášení platí do zavření stránky.
 // Smazání = null v paměti (ne delete), jinak by čtení vrátilo starou session z localStorage.
 // Paměť nepřežije obnovení stránky: co nejde smazat, přepíše se prázdnou hodnotou (= žádná session), a start() ověří sezení na serveru.
+var AUTH_KLIC = SCHEMA + '-auth';
 var authPamet = {};
 var AUTH_NEPLATNE = ['bad_jwt', 'user_not_found', 'user_banned']; // session_not_found zahodí supabase-js sám
 var authStorage = {
@@ -126,6 +127,37 @@ var authStorage = {
     }, 0);
   }
 };
+// Odhlášení jen tohoto zařízení. Povede se vždy: signOut při vypršeném tokenu a výpadku vrací chybu bez smazání session
+// (až po 30 s opakování) a bez odpovědi serveru neskončí vůbec, proto se při chybě nebo po limitu session smaže tady.
+var ODHLASENI_LIMIT_MS = 5000;
+var odhlasovani = null; // běžící signOut; nové přihlášení na něj čeká, jinak by mu opožděný signOut session smazal
+function odhlasen() {
+  if (!uzivatel) return; // opožděná událost nesmí překreslit rozepsané přihlášení
+  uzivatel = null; pristup = null; S = prazdnaData();
+  location.hash = '#/'; render();
+}
+function odhlasit() {
+  var smazano = false;
+  function jenLokalne(duvod) {
+    if (smazano) return;
+    smazano = true;
+    log('odhlášení offline – session smazána jen lokálně', '(' + duvod + ')');
+    authStorage.removeItem(AUTH_KLIC);
+    odhlasen();
+  }
+  var limit = setTimeout(function () { jenLokalne('server neodpověděl'); }, ODHLASENI_LIMIT_MS);
+  odhlasovani = sb.auth.signOut({ scope: 'local' }).catch(function (e) { return { error: e }; }).then(function (r) {
+    clearTimeout(limit);
+    if (r.error) jenLokalne((r.error.status || '') + ' ' + r.error.message); else odhlasen();
+    odhlasovani = null;
+  });
+}
+// Odhlášení v jiné záložce: kopie v paměti této záložky by při obnově tokenu session zapsala zpět.
+window.addEventListener('storage', function (e) {
+  if (e.key !== AUTH_KLIC || e.newValue) return; // jen smazání nebo přepsání prázdnou hodnotou
+  authPamet[AUTH_KLIC] = null;
+  odhlasen();
+});
 function nactiSkript(src) {
   return new Promise(function (res, rej) {
     var el = document.createElement('script'); el.src = src; el.onload = res;
@@ -156,11 +188,11 @@ function start() {
   if (DEMO) return render();
   app.innerHTML = '<main><h1>Kalibrace</h1><div class="empty">Načítám…</div></main>';
   nactiSkript(SUPABASE_JS).then(function () {
-    sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY, { auth: { storage: authStorage, storageKey: SCHEMA + '-auth', persistSession: true, autoRefreshToken: true } });
+    sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY, { auth: { storage: authStorage, storageKey: AUTH_KLIC, persistSession: true, autoRefreshToken: true } });
     db = sb.schema(SCHEMA);
     sb.auth.onAuthStateChange(function (udalost) {
       log('auth', udalost);
-      if (udalost === 'SIGNED_OUT') { uzivatel = null; pristup = null; S = prazdnaData(); render(); }
+      if (udalost === 'SIGNED_OUT') odhlasen();
     });
     return sb.auth.getSession();
   }).then(function (r) {
@@ -194,7 +226,10 @@ function vPrihlaseni() {
     var f = new FormData(e.target), email = f.get('email').trim(), heslo = f.get('heslo');
     if (!email || !heslo) return chyba('Vyplň e-mail a heslo.');
     var btn = e.target.querySelector('button'); btn.disabled = true;
-    sb.auth.signInWithPassword({ email: email, password: heslo }).then(function (r) {
+    chyba(odhlasovani ? 'Dokončuji předchozí odhlášení… Kdyby to trvalo déle než půl minuty, obnov stránku.' : '');
+    Promise.resolve(odhlasovani).then(function () {
+      return sb.auth.signInWithPassword({ email: email, password: heslo });
+    }).then(function (r) {
       log('přihlášení', r.error ? (r.error.status + ' ' + r.error.message) : 'ok');
       if (r.error) throw new Error(/invalid login/i.test(r.error.message) ? 'Špatný e-mail nebo heslo.' : r.error.message);
       return sb.auth.getSession();
@@ -583,7 +618,7 @@ var AKCE = {
   smazatSkupinu: function (b) { api.smazSkupinu(b.dataset.id).then(function () { location.hash = '#/skupiny'; }, selhalo); },
   otevrit: function (b) { otevritSoubor(b.dataset.path); },
   sdilet: function (b) { sdilet(b.dataset.path, b.dataset.nazev); },
-  odhlasit: function () { sb.auth.signOut().then(function (r) { if (r.error) logChyba(r.error.message); location.hash = '#/'; }); }
+  odhlasit: function (b) { if (odhlasovani) return; b.disabled = true; b.textContent = 'Odhlašuji…'; odhlasit(); }
 };
 document.addEventListener('click', function (e) {
   var b = e.target.closest('[data-act]');

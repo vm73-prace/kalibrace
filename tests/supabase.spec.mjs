@@ -323,3 +323,166 @@ test('neuložená session: srozumitelná hláška, log a žádný dotaz jako ano
   expect(chyby).toEqual(['[kal] session se neuložila']); // jediná chyba v konzoli je očekávaný záznam
   chyby.length = 0;
 });
+
+// Odhlášení jen tohoto zařízení a vždy úspěšné
+const OFFLINE = 'odhlášení offline – session smazána jen lokálně';
+async function vyprsTokenu(page) { // v paměti i v localStorage, stránka zůstává otevřená
+  await page.evaluate(() => {
+    const s = JSON.parse(authStorage.getItem('kalibrace-auth'));
+    s.expires_at = Math.floor(Date.now() / 1000) - 60;
+    authStorage.setItem('kalibrace-auth', JSON.stringify(s));
+  });
+  await expect.poll(async () => JSON.parse(await ulozenaSession(page)).expires_at).toBeLessThan(Date.now() / 1000);
+}
+const vypni = (auth, porucha) => ['token', 'logout', 'user'].forEach((x) => { auth.selhani[x] = porucha; });
+function zadrz() { let pust; const ceka = new Promise((res) => { pust = res; }); return { ceka, pust }; }
+async function odhlasBezServeru(page) {
+  const zaznamy = [];
+  page.on('console', (m) => zaznamy.push(m.text()));
+  await page.evaluate(() => { location.hash = '#/nastaveni'; });
+  await page.getByRole('button', { name: 'Odhlásit' }).click();
+  // 40 s = déle než opakování v supabase-js (30 s): selhání testu znamená, že neodhlásí vůbec
+  await expect(page.locator('#f_email')).toBeVisible({ timeout: 40000 });
+  await expect.poll(() => zaznamy.filter((t) => t.includes(OFFLINE)).length).toBe(1);
+}
+async function zustavaOdhlaseny(page, auth) {
+  await page.reload();
+  await expect(page.locator('#f_email')).toBeVisible();
+  auth.selhani = {}; // server zase běží a sezení na něm pořád platí
+  await page.reload();
+  await expect(page.locator('#f_email')).toBeVisible();
+  await expect(page.locator('main')).not.toContainText('Anemometry');
+}
+
+test('(a) odhlášení na jednom zařízení neodhlásí druhé', async ({ page, browser }) => {
+  const server = await prihlaseny(page);
+  const ctx2 = await browser.newContext();
+  const druhe = await ctx2.newPage();
+  await mockSupabase(druhe, { server });
+  await druhe.goto('/');
+  await prihlas(druhe);
+  await expect(druhe.locator('main')).toContainText('Anemometry');
+  await expect.poll(() => ulozenaSession(druhe)).toContain('access_token');
+
+  await odhlas(page);
+  await page.reload();
+  await expect(page.locator('#f_email')).toBeVisible();
+
+  await druhe.reload();
+  await expect(druhe.locator('main')).toContainText('Anemometry');
+  // projde i obnova tokenu, ne jen dosud platný JWT
+  expect(await druhe.evaluate(async () => (await sb.auth.refreshSession()).error)).toBeNull();
+  expect(server.auth.odhlaseni).toEqual(['local']);
+  await ctx2.close();
+});
+
+for (const porucha of [503, 'sit', 429, 'bez odpovědi']) {
+  test(`(b) vypršený token a nedostupný server (${porucha}): odhlásí a po F5 zůstane`, async ({ page }) => {
+    test.setTimeout(80000);
+    ocekavane = /Failed to load resource|výpadek|Failed to fetch/;
+    const { auth } = await prihlaseny(page);
+    await vyprsTokenu(page);
+    const z = zadrz();
+    vypni(auth, porucha === 'bez odpovědi' ? z.ceka : porucha);
+    await odhlasBezServeru(page);
+    await expect.poll(() => ulozenaSession(page)).toBeNull();
+    await zustavaOdhlaseny(page, auth);
+    z.pust();
+  });
+}
+
+for (const zpusob of ['tise', 'vyjimka']) {
+  for (const porucha of [503, 'sit']) {
+    test(`(c) vypršený token, nedostupný server (${porucha}) a blokované mazání (${zpusob}): po F5 odhlášený`, async ({ page }) => {
+      test.setTimeout(80000);
+      ocekavane = /Failed to load resource|výpadek|Failed to fetch/;
+      const { auth } = await prihlaseny(page);
+      await vyprsTokenu(page);
+      vypni(auth, porucha);
+      await blokujUloziste(page, ['removeItem'], zpusob);
+      await odhlasBezServeru(page);
+      await expect.poll(() => ulozenaSession(page)).toBe(''); // přepsáno prázdnou hodnotou
+      await zustavaOdhlaseny(page, auth);
+    });
+  }
+}
+
+for (const porucha of [500, 'sit', 'bez odpovědi']) {
+  test(`platný token a nedostupný server (${porucha}): odhlásí a zapíše to do logu`, async ({ page }) => {
+    test.setTimeout(80000);
+    ocekavane = /Failed to load resource/;
+    const { auth } = await prihlaseny(page);
+    const z = zadrz();
+    vypni(auth, porucha === 'bez odpovědi' ? z.ceka : porucha);
+    await odhlasBezServeru(page);
+    await zustavaOdhlaseny(page, auth);
+    z.pust();
+  });
+}
+
+test('odhlášení offline je vidět v debug panelu', async ({ page }) => {
+  ocekavane = /Failed to load resource/;
+  const { auth } = await prihlaseny(page);
+  await page.goto('/?debug=1#/nastaveni');
+  await expect(page.locator('#ucet')).toHaveText(EMAIL);
+  auth.selhani.logout = 'sit';
+  await page.getByRole('button', { name: 'Odhlásit' }).dispatchEvent('click'); // debug panel překrývá tlačítko
+  await expect(page.locator('#f_email')).toBeVisible();
+  await expect(page.locator('#debug')).toContainText(OFFLINE);
+});
+
+test('obnova tokenu doběhne až po odhlášení: session se nevrátí', async ({ page }) => {
+  test.setTimeout(80000);
+  const { auth } = await prihlaseny(page);
+  await vyprsTokenu(page);
+  const z = zadrz();
+  auth.selhani.token = z.ceka;
+  await odhlasBezServeru(page);
+  const odpoved = page.waitForResponse(/\/auth\/v1\/token/);
+  z.pust();
+  await odpoved;
+  expect(await page.evaluate(async () => (await sb.auth.getSession()).data.session)).toBeNull();
+  delete auth.selhani.token;
+  await page.reload();
+  await expect(page.locator('#f_email')).toBeVisible();
+});
+
+for (const sluzba of ['token', 'logout']) {
+  test(`nové přihlášení počká na nedokončené odhlášení (${sluzba}) a to ho nesmaže`, async ({ page }) => {
+    test.setTimeout(80000);
+    const { auth } = await prihlaseny(page);
+    if (sluzba === 'token') await vyprsTokenu(page);
+    const z = zadrz();
+    auth.selhani[sluzba] = z.ceka;
+    await odhlasBezServeru(page);
+    delete auth.selhani[sluzba]; // další požadavky už server vyřídí hned
+    await prihlas(page);
+    await page.waitForTimeout(500); // čas, ve kterém by nové přihlášení předběhlo staré odhlášení
+    z.pust();
+    await expect(page.locator('main')).toContainText('Anemometry');
+    await page.waitForTimeout(300); // doběhne staré odhlášení i odložený zápis
+    await page.reload();
+    await expect(page.locator('main')).toContainText('Anemometry');
+  });
+}
+
+for (const [popis, blokace] of [['', null], [' a blokovaném mazání', ['removeItem']]]) {
+  test(`(b) druhá záložka po odhlášení offline${popis} session nevrátí`, async ({ page, context }) => {
+    test.setTimeout(80000);
+    ocekavane = /Failed to load resource/;
+    const { auth } = await prihlaseny(page);
+    const zalozka = await context.newPage();
+    await zalozka.goto('/');
+    await expect(zalozka.locator('main')).toContainText('Anemometry');
+    await vyprsTokenu(zalozka); // má session i ve své paměti, jako po obnově tokenu
+    await vyprsTokenu(page);
+    vypni(auth, 'sit');
+    if (blokace) await blokujUloziste(page, blokace);
+    await odhlasBezServeru(page);
+    await expect(zalozka.locator('#f_email')).toBeVisible();
+    auth.selhani = {};
+    expect(await zalozka.evaluate(async () => (await sb.auth.getSession()).data.session)).toBeNull();
+    await page.reload();
+    await expect(page.locator('#f_email')).toBeVisible();
+  });
+}

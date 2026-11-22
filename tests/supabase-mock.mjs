@@ -21,10 +21,11 @@ const sidZJwt = (h) => {
   try { return JSON.parse(Buffer.from(h.authorization.split('.')[1], 'base64url').toString()).session_id; } catch { return null; }
 };
 
-export async function mockSupabase(page, { pristup = true } = {}) {
-  const store = { skupiny: [], pristroje: [], kalibrace: [], nastaveni: [], soubory: {} }; // soubory: 'bucket/cesta' -> velikost
-  // Auth: platná sezení a poruchy (logout / user / token: HTTP status nebo 'sit'; neplatna: error_code, kterým Auth odmítne JWT)
-  const auth = { sezeni: new Set(), selhani: {}, neplatna: null, odhlaseni: [] };
+// server: výsledek jiného mocku = druhé zařízení proti témuž serveru
+export async function mockSupabase(page, { pristup = true, server } = {}) {
+  const store = server?.store || { skupiny: [], pristroje: [], kalibrace: [], nastaveni: [], soubory: {} }; // soubory: 'bucket/cesta' -> velikost
+  // Auth: platná sezení a poruchy (logout / user / token: HTTP status, 'sit' nebo Promise = odpověď až po jejím splnění; neplatna: error_code, kterým Auth odmítne JWT)
+  const auth = server?.auth || { sezeni: new Set(), selhani: {}, neplatna: null, odhlaseni: [] };
   const hlavicky = []; // hodnoty Accept-Profile / Content-Profile všech REST dotazů
   const ctx = page.context(); // i pro nová okna (Otevřít protokol)
   await ctx.route('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@*/**', (r) => r.fulfill({ body: UMD, contentType: 'application/javascript' }));
@@ -35,7 +36,8 @@ export async function mockSupabase(page, { pristup = true } = {}) {
 
     const sluzba = url.pathname.replace('/auth/v1/', ''), porucha = auth.selhani[sluzba];
     if (porucha === 'sit') return route.abort('connectionfailed');
-    if (porucha) return json(porucha, { code: porucha, error_code: porucha === 429 ? 'over_request_rate_limit' : 'unexpected_failure', msg: 'výpadek' });
+    if (porucha instanceof Promise) await porucha;
+    else if (porucha) return json(porucha, { code: porucha, error_code: porucha === 429 ? 'over_request_rate_limit' : 'unexpected_failure', msg: 'výpadek' });
     if (url.pathname === '/auth/v1/token') {
       const b = req.postDataJSON();
       if (url.searchParams.get('grant_type') === 'refresh_token') {
