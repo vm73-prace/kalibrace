@@ -1,5 +1,5 @@
 /* Evidence kalibrací – appka (vanilla JS). Výpočty jsou v calc.js, ukázková data v demo.js. */
-var VERZE = 8;
+var VERZE = 9;
 var Q = new URLSearchParams(location.search);
 var DEBUG = Q.get('debug') === '1';
 var DEMO = Q.get('demo') === '1'; // ?demo=1 = ukázková data v paměti, bez Supabase
@@ -112,11 +112,19 @@ var api = DEMO ? apiDemo : apiSupabase;
 // Úložiště přihlášení: kopie v paměti a zápis do localStorage odložený (Avast AntiTrack blokuje synchronní zápis
 // ze skriptu z CDN); když localStorage nejde, přihlášení platí do zavření stránky.
 // Smazání = null v paměti (ne delete), jinak by čtení vrátilo starou session z localStorage.
+// Paměť nepřežije obnovení stránky: co nejde smazat, přepíše se prázdnou hodnotou (= žádná session), a start() ověří sezení na serveru.
 var authPamet = {};
+var AUTH_NEPLATNE = ['bad_jwt', 'user_not_found', 'user_banned']; // session_not_found zahodí supabase-js sám
 var authStorage = {
-  getItem: function (k) { if (k in authPamet) return authPamet[k]; try { return localStorage.getItem(k); } catch (e) { return null; } },
+  getItem: function (k) { if (k in authPamet) return authPamet[k]; try { return localStorage.getItem(k) || null; } catch (e) { return null; } },
   setItem: function (k, v) { authPamet[k] = v; setTimeout(function () { try { localStorage.setItem(k, v); } catch (e) { log('auth: localStorage nejde zapsat'); } }, 0); },
-  removeItem: function (k) { authPamet[k] = null; setTimeout(function () { try { localStorage.removeItem(k); } catch (e) { /* bez úložiště */ } }, 0); }
+  removeItem: function (k) {
+    authPamet[k] = null;
+    setTimeout(function () {
+      try { localStorage.removeItem(k); } catch (e) { log('auth: localStorage nejde smazat'); }
+      try { if (localStorage.getItem(k)) localStorage.setItem(k, ''); } catch (e) { log('auth: localStorage nejde přepsat'); }
+    }, 0);
+  }
 };
 function nactiSkript(src) {
   return new Promise(function (res, rej) {
@@ -156,6 +164,16 @@ function start() {
     });
     return sb.auth.getSession();
   }).then(function (r) {
+    if (!r.data.session) return r;
+    // Session z localStorage může být po odhlášení (blokované mazání) – ověří se na serveru. Zahodí se jen odmítnutá, při výpadku zůstane.
+    return sb.auth.getUser().then(function (u) {
+      if (!u.error) return;
+      log('auth: ověření sezení', (u.error.code || u.error.status || '') + ' ' + u.error.message);
+      if (AUTH_NEPLATNE.indexOf(u.error.code) >= 0) return sb.auth.signOut({ scope: 'local' }); // ostatní zařízení nechat být
+    }).then(function () { return sb.auth.getSession(); });
+  }).then(function (r) {
+    // vypršený token a výpadek: session v úložišti zůstává, přihlašovací formulář by vypadal jako odhlášení
+    if (!r.data.session && r.error && r.error.name === 'AuthRetryableFetchError') throw new Error('Server přihlášení není dostupný. Přihlášení zůstává uložené, zkus to za chvíli znovu.');
     uzivatel = r.data.session ? r.data.session.user : null;
     return uzivatel ? nactiData() : null;
   }).then(render).catch(function (e) {

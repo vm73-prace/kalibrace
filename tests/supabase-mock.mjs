@@ -11,15 +11,20 @@ export const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAA
 const CORS = { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*', 'access-control-allow-methods': '*', 'access-control-expose-headers': '*' };
 const b64 = (o) => Buffer.from(JSON.stringify(o)).toString('base64url');
 
-function session() {
+function session(sid = randomUUID()) {
   const now = Math.floor(Date.now() / 1000);
   const user = { id: UID, email: EMAIL, aud: 'authenticated', role: 'authenticated', app_metadata: {}, user_metadata: {}, created_at: new Date().toISOString() };
-  const token = b64({ alg: 'HS256', typ: 'JWT' }) + '.' + b64({ sub: UID, email: EMAIL, role: 'authenticated', aud: 'authenticated', exp: now + 3600, iat: now, session_id: 's1' }) + '.podpis';
-  return { access_token: token, token_type: 'bearer', expires_in: 3600, expires_at: now + 3600, refresh_token: 'obnova', user };
+  const token = b64({ alg: 'HS256', typ: 'JWT' }) + '.' + b64({ sub: UID, email: EMAIL, role: 'authenticated', aud: 'authenticated', exp: now + 3600, iat: now, session_id: sid }) + '.podpis';
+  return { access_token: token, token_type: 'bearer', expires_in: 3600, expires_at: now + 3600, refresh_token: sid, user };
 }
+const sidZJwt = (h) => {
+  try { return JSON.parse(Buffer.from(h.authorization.split('.')[1], 'base64url').toString()).session_id; } catch { return null; }
+};
 
 export async function mockSupabase(page, { pristup = true } = {}) {
   const store = { skupiny: [], pristroje: [], kalibrace: [], nastaveni: [], soubory: {} }; // soubory: 'bucket/cesta' -> velikost
+  // Auth: platná sezení a poruchy (logout / user / token: HTTP status nebo 'sit'; neplatna: error_code, kterým Auth odmítne JWT)
+  const auth = { sezeni: new Set(), selhani: {}, neplatna: null, odhlaseni: [] };
   const hlavicky = []; // hodnoty Accept-Profile / Content-Profile všech REST dotazů
   const ctx = page.context(); // i pro nová okna (Otevřít protokol)
   await ctx.route('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@*/**', (r) => r.fulfill({ body: UMD, contentType: 'application/javascript' }));
@@ -28,13 +33,31 @@ export async function mockSupabase(page, { pristup = true } = {}) {
     const json = (status, body) => route.fulfill({ status, headers: { ...CORS, 'content-type': 'application/json' }, body: body === undefined ? '' : JSON.stringify(body) });
     if (m === 'OPTIONS') return route.fulfill({ status: 204, headers: CORS });
 
+    const sluzba = url.pathname.replace('/auth/v1/', ''), porucha = auth.selhani[sluzba];
+    if (porucha === 'sit') return route.abort('connectionfailed');
+    if (porucha) return json(porucha, { code: porucha, error_code: porucha === 429 ? 'over_request_rate_limit' : 'unexpected_failure', msg: 'výpadek' });
     if (url.pathname === '/auth/v1/token') {
       const b = req.postDataJSON();
+      if (url.searchParams.get('grant_type') === 'refresh_token') {
+        if (!auth.sezeni.has(b.refresh_token)) return json(400, { code: 400, error_code: 'refresh_token_not_found', msg: 'Invalid Refresh Token: Refresh Token Not Found' });
+        return json(200, session(b.refresh_token));
+      }
       if (b.password !== HESLO) return json(400, { code: 400, error_code: 'invalid_credentials', msg: 'Invalid login credentials' });
-      return json(200, session());
+      const nova = session();
+      auth.sezeni.add(nova.refresh_token);
+      return json(200, nova);
     }
-    if (url.pathname === '/auth/v1/logout') return route.fulfill({ status: 204, headers: CORS });
-    if (url.pathname === '/auth/v1/user') return json(200, session().user);
+    // jako produkce: odhlášení zruší sezení na serveru, REST ale JWT bere dál až do vypršení
+    if (sluzba === 'logout' || sluzba === 'user') {
+      const sid = sidZJwt(h), rozsah = url.searchParams.get('scope');
+      if (sluzba === 'logout') auth.odhlaseni.push(rozsah);
+      if (!sid) return json(401, { code: 401, error_code: 'no_authorization', msg: 'This endpoint requires a valid Bearer token' });
+      if (auth.neplatna) return json(403, { code: 403, error_code: auth.neplatna, msg: 'odmítnuto: ' + auth.neplatna });
+      if (!auth.sezeni.has(sid)) return json(403, { code: 403, error_code: 'session_not_found', msg: 'Session from session_id claim in JWT does not exist' });
+      if (sluzba === 'user') return json(200, session(sid).user);
+      if (rozsah === 'local') auth.sezeni.delete(sid); else auth.sezeni.clear();
+      return route.fulfill({ status: 204, headers: CORS });
+    }
 
     // Storage: upload, podepsané URL (jedna i dávka), stažení, mazání
     if (url.pathname.startsWith('/storage/v1/object/')) {
@@ -57,7 +80,12 @@ export async function mockSupabase(page, { pristup = true } = {}) {
     const cesta = url.pathname.replace('/rest/v1/', '');
     hlavicky.push(m === 'GET' ? h['accept-profile'] : h['content-profile']);
     // jako produkce: bez JWT přihlášeného (jen publishable klíč) je to anon a ten nemá žádná práva
-    if (!(h.authorization || '').startsWith('Bearer eyJ')) return json(401, { code: '42501', message: 'permission denied for ' + cesta });
+    if (!(h.authorization || '').startsWith('Bearer eyJ')) {
+      const chyba = { code: '42501', details: null, hint: null };
+      if (cesta.startsWith('rpc/')) return json(401, { ...chyba, message: 'permission denied for function ' + cesta.slice(4) });
+      const pravo = { GET: 'SELECT', POST: 'INSERT', PATCH: 'UPDATE', DELETE: 'DELETE' }[m];
+      return json(401, { ...chyba, hint: `Grant the required privileges to the current role with: GRANT ${pravo} ON kalibrace.${cesta} TO anon;`, message: 'permission denied for table ' + cesta });
+    }
     if (cesta === 'rpc/smi') return json(200, pristup);
     const t = store[cesta];
     if (!t) return json(404, { code: 'PGRST205', message: 'neznámá tabulka ' + cesta });
@@ -85,5 +113,5 @@ export async function mockSupabase(page, { pristup = true } = {}) {
     }
     return json(405, { message: 'metoda ' + m });
   });
-  return { store, hlavicky };
+  return { store, hlavicky, auth };
 }

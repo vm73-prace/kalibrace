@@ -2,14 +2,14 @@
 import { test, expect } from '@playwright/test';
 import { mockSupabase, EMAIL, HESLO, UID, PNG } from './supabase-mock.mjs';
 
-let chyby;
+let chyby, ocekavane;
 test.beforeEach(async ({ page }) => {
-  chyby = [];
+  chyby = []; ocekavane = null;
   page.on('pageerror', (e) => chyby.push(e.message));
   page.on('console', (m) => { if (m.type() === 'error') chyby.push(m.text()); });
 });
 // 400 ze špatného hesla prohlížeč hlásí jako „Failed to load resource“ – to je očekávané
-test.afterEach(() => expect(chyby.filter((c) => !/Failed to load resource.*400/.test(c)), 'chyby JS v konzoli').toEqual([]));
+test.afterEach(() => expect(chyby.filter((c) => !/Failed to load resource.*400/.test(c) && !(ocekavane && ocekavane.test(c))), 'chyby JS v konzoli').toEqual([]));
 
 async function prihlas(page, heslo = HESLO) {
   await page.locator('#f_email').fill(EMAIL);
@@ -140,6 +140,7 @@ for (const [popis, blokuj] of Object.entries(BLOKACE)) {
     await prihlas(page);
     await expect(page.locator('main')).toContainText('Anemometry');
     await expect(page.locator('#souhrn')).toBeVisible();
+    expect(await page.evaluate(() => { try { return localStorage.getItem('kalibrace-auth'); } catch { return null; } })).toBeNull(); // blokování opravdu platilo
     // přihlášení jen v paměti: po obnovení stránky se přihlašuje znovu
     await page.reload();
     await expect(page.locator('#f_email')).toBeVisible();
@@ -176,6 +177,135 @@ test('odhlášení platí i při blokovaném mazání z localStorage', async ({ 
   await expect(page.locator('#f_email')).toBeVisible();
   expect(await page.evaluate(async () => (await sb.auth.getSession()).data.session)).toBeNull();
 });
+
+// Odhlášení a ověření sezení při startu
+// zpusob: 'tise' = volání nic neudělá, 'vyjimka' = vyhodí chybu. Platí hned i po každém obnovení stránky.
+async function blokujUloziste(page, metody, zpusob = 'tise') {
+  const blokuj = ({ metody, zpusob }) => metody.forEach((m) => {
+    const puvodni = Storage.prototype[m];
+    Storage.prototype[m] = function () {
+      if (this !== window.localStorage) return puvodni.apply(this, arguments);
+      if (zpusob === 'vyjimka') throw new DOMException('blokováno', 'SecurityError');
+    };
+  });
+  await page.addInitScript(blokuj, { metody, zpusob });
+  await page.evaluate(blokuj, { metody, zpusob });
+}
+const ulozenaSession = (page) => page.evaluate(() => localStorage.getItem('kalibrace-auth'));
+async function prihlaseny(page) {
+  const mock = await mockSupabase(page);
+  mock.store.skupiny.push({ ...SKUPINA });
+  await page.goto('/');
+  await prihlas(page);
+  await expect(page.locator('main')).toContainText('Anemometry');
+  await expect.poll(() => ulozenaSession(page)).toContain('access_token'); // odložený zápis proběhl
+  return mock;
+}
+async function odhlas(page) {
+  await page.evaluate(() => { location.hash = '#/nastaveni'; });
+  await page.getByRole('button', { name: 'Odhlásit' }).click();
+  await expect(page.locator('#f_email')).toBeVisible();
+}
+
+test('mock: anon dostane 401 / 42501 se zněním jako produkce', async ({ page }) => {
+  ocekavane = /Failed to load resource.*401/;
+  await mockSupabase(page);
+  await page.goto('/');
+  await expect(page.locator('#f_email')).toBeVisible();
+  const r = await page.evaluate(async () => [await db.rpc('smi'), await db.from('skupiny').select('*')].map((x) => [x.status, x.error.code, x.error.message, x.error.hint]));
+  expect(r).toEqual([
+    [401, '42501', 'permission denied for function smi', null],
+    [401, '42501', 'permission denied for table skupiny', 'Grant the required privileges to the current role with: GRANT SELECT ON kalibrace.skupiny TO anon;']
+  ]);
+});
+
+for (const zpusob of ['tise', 'vyjimka']) {
+  for (const metody of [['removeItem'], ['removeItem', 'setItem']]) {
+    test(`blokované mazání (${metody.join(' + ')}, ${zpusob}): po odhlášení a obnovení je odhlášený`, async ({ page }) => {
+      ocekavane = /Failed to load resource.*403/; // server odmítne zrušené sezení
+      await prihlaseny(page);
+      await blokujUloziste(page, metody, zpusob);
+      await odhlas(page);
+      await page.reload();
+      await expect(page.locator('#f_email')).toBeVisible();
+      await expect(page.locator('main')).not.toContainText('Anemometry');
+    });
+  }
+}
+
+test('blokované mazání i zápis: po odhlášení se jde znovu přihlásit', async ({ page }) => {
+  await prihlaseny(page);
+  await blokujUloziste(page, ['removeItem', 'setItem']);
+  await odhlas(page);
+  await prihlas(page);
+  await expect(page.locator('main')).toContainText('Anemometry');
+});
+
+for (const zpusob of ['tise', 'vyjimka']) {
+  test(`blokované mazání (${zpusob}) a výpadek serveru při odhlášení: po obnovení je odhlášený`, async ({ page }) => {
+    ocekavane = /Failed to load resource.*500|výpadek/;
+    const { auth } = await prihlaseny(page);
+    auth.selhani.logout = 500;
+    await blokujUloziste(page, ['removeItem'], zpusob);
+    await odhlas(page);
+    await page.reload();
+    await expect(page.locator('#f_email')).toBeVisible();
+    expect(await ulozenaSession(page)).toBe(''); // přepsáno prázdnou hodnotou
+  });
+}
+
+for (const porucha of [500, 503, 429, 'sit']) {
+  test(`výpadek ověření při startu (${porucha}) nikoho neodhlásí`, async ({ page }) => {
+    ocekavane = /Failed to load resource/;
+    const { auth } = await prihlaseny(page);
+    auth.selhani.user = porucha;
+    await page.reload();
+    await expect(page.locator('main')).toContainText('Anemometry');
+    expect(await ulozenaSession(page)).toContain('access_token');
+    expect(auth.odhlaseni).toEqual([]);
+  });
+}
+
+test('výpadek při startu s vypršeným tokenem: nabídne opakování a přihlášení zůstane', async ({ page }) => {
+  test.setTimeout(90000); // supabase-js obnovu tokenu opakuje až 30 s
+  ocekavane = /Failed to load resource|Server přihlášení není dostupný/;
+  const { auth } = await prihlaseny(page);
+  await page.evaluate(() => {
+    const s = JSON.parse(localStorage.getItem('kalibrace-auth'));
+    s.expires_at = Math.floor(Date.now() / 1000) - 60;
+    localStorage.setItem('kalibrace-auth', JSON.stringify(s));
+  });
+  auth.selhani.token = 503;
+  await page.reload();
+  await expect(page.locator('main')).not.toContainText('Načítám', { timeout: 60000 });
+  await expect(page.locator('.err')).toContainText('Server přihlášení není dostupný');
+  await expect(page.locator('#f_email')).toHaveCount(0);
+  expect(await ulozenaSession(page)).toContain('access_token');
+  delete auth.selhani.token;
+  await page.getByRole('button', { name: 'Zkusit znovu' }).click();
+  await expect(page.locator('main')).toContainText('Anemometry');
+});
+
+test('sezení zrušené na serveru se při startu zahodí', async ({ page }) => {
+  ocekavane = /Failed to load resource.*403/;
+  const { auth } = await prihlaseny(page);
+  auth.sezeni.clear(); // odhlášení z jiného zařízení
+  await page.reload();
+  await expect(page.locator('#f_email')).toBeVisible();
+  await expect.poll(() => ulozenaSession(page)).toBeNull();
+});
+
+for (const kod of ['bad_jwt', 'user_not_found', 'user_banned']) {
+  test(`neplatná session (${kod}) se při startu zahodí jen v tomto zařízení`, async ({ page }) => {
+    ocekavane = /Failed to load resource.*403/;
+    const { auth } = await prihlaseny(page);
+    auth.neplatna = kod;
+    await page.reload();
+    await expect(page.locator('#f_email')).toBeVisible();
+    await expect.poll(() => ulozenaSession(page)).toBeNull();
+    expect(auth.odhlaseni).toEqual(['local']);
+  });
+}
 
 test('neuložená session: srozumitelná hláška, log a žádný dotaz jako anon', async ({ page }) => {
   const { hlavicky } = await mockSupabase(page);
