@@ -14,6 +14,7 @@
 
 ## Stav projektu (2026-11-22)
 
+- **Kde navázat:** nasazená verze 10, čeká na ověření správcem (viz „Neověřeno“ u v10). Při nejbližší úpravě appky přidat Odhlásit na obrazovku výpadku (viz „Další krok“).
 - **Verze 10 (2026-11-22), odhlášení jen tohoto zařízení, nasazeno (commit 510697f):**
   1. Odhlásit volá `signOut({ scope: 'local' })`, ostatní zařízení zůstanou přihlášená.
   2. Když `signOut` vrátí chybu nebo do **5 s** neskončí, appka smaže session sama (`authStorage.removeItem`), ukáže přihlášení a zaloguje „odhlášení offline – session smazána jen lokálně“. Limit je nutný: supabase-js při výpadku obnovu tokenu opakuje až 30 s a bez odpovědi serveru čeká bez konce.
@@ -23,7 +24,7 @@
   - **Zbývající meze odhlášení (všechny ověřené proti mocku):**
     - blokované mazání i zápis **a zároveň** nedostupný server → po F5 zase přihlášený (odhlášení není kam zapsat, ani předat jiné záložce),
     - F5 nebo zavření appky během „Odhlašuji…“ (nejvýš 5 s) → zůstane přihlášený,
-    - výpadek už při načtení appky → jen hláška a „Zkusit znovu“, tlačítko Odhlásit tam není,
+    - výpadek už při načtení appky → jen hláška a „Zkusit znovu“, tlačítko Odhlásit tam není (odloženo, viz Další krok),
     - po odhlášení úplně bez internetu a F5 → hláška o nenačtené knihovně (CDN) místo formuláře; session je smazaná, po připojení se ukáže přihlášení.
   - **Důsledky:** odhlášení offline nechá sezení na serveru platné (v zařízení už není). Odhlásit už neslouží k odhlášení ztraceného zařízení, to jde jen na straně Supabase. Odhlášení s výchozím rozsahem v jiné appce se stejným účtem dál ruší i sezení kalibrace.
   - Testy: Node 48/48, Python 21/21, Playwright 280/280 (18 nových v 5 profilech). Proti v9 selhalo všech 11 testů (a), (b), (c) v profilu iPhone 13 a všech 16 nových testů první sady v profilu w390; 2 testy záložek přibyly potom a selhaly i proti opravě bez události `storage`.
@@ -70,7 +71,11 @@
 - **Vzhled:** (barvy a štítky viz v5 výše) schválený s úpravami (2026-11-14): zelená skupina jen šedé „Na řadě: SN … · odeslat do <datum>“ (skryté, když je kus na kalibraci), „Pošli na kalibraci“ jen u oranžové/červené; souhrn po skupinách; skupina o 1 kusu bez hlavičky (výzva u přístroje); lišta na šířku obsahu.
 - **Datový model:** oproti návrhu navíc složené cizí klíče `(skupina_id, owner)` a `(pristroj_id, owner)` (data nejdou provázat napříč uživateli); cesta v Storage je `<uid>/<soubor>`.
 - **Git:** repo https://github.com/vm73-prace/kalibrace (veřejné), větev `main`. GitHub Pages zapnuté (push do `main` = nasazení).
-- **Další krok:** správce ověří na iPhonu (přidat na plochu, přihlášení, zadat reálné přístroje, fotka, protokol Otevřít/Sdílet) a pošle výsledek; později výměna SMTP za firemní účet (4 secrets, README). Pak v2 podle „Mimo rozsah v1“.
+- **Další krok (s nejbližší úpravou appky, ne samostatně; rozhodnutí správce 2026-11-22):** tlačítko **Odhlásit** na obrazovce výpadku se „Zkusit znovu“ (`catch` ve `start()`). Při tom pozor (zjištěno čtením kódu):
+  - když se nenačte knihovna, je `sb` null → session smazat přímo přes `authStorage.removeItem(AUTH_KLIC)`, ne `signOut`,
+  - při vypršeném tokenu nebo bez knihovny je tam `uzivatel` null a `odhlasen()` hned skončí → obrazovku po odhlášení překreslit zvlášť; přihlašovací formulář bez `sb` nefunguje,
+  - testy: výpadek REST, vypršený token a výpadek, nenačtená knihovna; po obnovení serveru a F5 musí zůstat odhlášený.
+- **Další kroky správce:** správce ověří na iPhonu (přidat na plochu, přihlášení, zadat reálné přístroje, fotka, protokol Otevřít/Sdílet) a pošle výsledek; později výměna SMTP za firemní účet (4 secrets, README). Pak v2 podle „Mimo rozsah v1“.
 - **Poznámky k testům:** Playwright běží v nainstalovaném Google Chrome (`channel: 'chrome'`), iPhone 13 je emulace viewportu v Chromiu, ne WebKit. Verze `@playwright/test` 1.65.1.
 - **Režimy:** `?demo=1` = `apiDemo` (data v paměti), jinak `apiSupabase`; obě mají stejné metody. V e2e testech s `?debug=1` debug panel překrývá spodní tlačítka, proto se tam kliká jen bez debug režimu.
 
